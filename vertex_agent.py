@@ -28,7 +28,10 @@ console = Console()
 DRY_RUN: bool = False
 MODEL_NAME = "gemini-2.5-pro"
 LOCATION = "us-central1"
+TEMPERATURE = 0.3
 _SYSTEM_INSTRUCTION: str | None = None
+
+_google_search_tool = types.Tool(google_search=types.GoogleSearch())
 
 # Tracks files read in the current session to enforce read-before-write.
 _read_files: set[str] = set()
@@ -750,6 +753,7 @@ def print_environment_header(project_id: str, vagent_content: str) -> None:
     grid.add_row("Current Path:", os.getcwd())
     grid.add_row("GCP Project:", f"[bold]{project_id}[/bold]")
     grid.add_row("Model:", MODEL_NAME)
+    grid.add_row("Temperature:", str(TEMPERATURE))
     grid.add_row("Tool Count:", str(tool_count))
     grid.add_row("Mode:", mode)
     grid.add_row(".vagent:", vagent_status)
@@ -857,7 +861,8 @@ def run_agent(client: genai.Client, project_id: str, vagent_content: str) -> Non
                             contents=chat_history,
                             config=types.GenerateContentConfig(
                                 system_instruction=_SYSTEM_INSTRUCTION,
-                                tools=[local_tools],
+                                tools=[local_tools, _google_search_tool],
+                                temperature=TEMPERATURE,
                             ),
                         )
                 except Exception as api_err:
@@ -908,6 +913,19 @@ def run_agent(client: genai.Client, project_id: str, vagent_content: str) -> Non
                     console.print()
                     render_response(text)
                     console.print()
+                    # ── Grounding sources ─────────────────────────────────
+                    grounding = getattr(candidate, "grounding_metadata", None)
+                    if grounding:
+                        chunks = getattr(grounding, "grounding_chunks", None) or []
+                        if chunks:
+                            console.print("[gray50]Sources:[/gray50]")
+                            for chunk in chunks:
+                                web = getattr(chunk, "web", None)
+                                if web:
+                                    title = getattr(web, "title", None) or getattr(web, "uri", "")
+                                    uri = getattr(web, "uri", "")
+                                    console.print(f"  [gray50]• [link={uri}]{markup_escape(title)}[/link][/gray50]")
+                            console.print()
                     total_tokens = response.usage_metadata.total_token_count
                     turn_time = time.monotonic() - turn_start
                     console.print(f"[gray50]✦ Calculated... ({turn_time:.1f}s • {total_tokens:,} tokens)[/gray50]")
