@@ -5,6 +5,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -834,6 +835,58 @@ def _build_prompt_session() -> PromptSession:
     )
 
 
+def _generate_with_cancel(
+    client: genai.Client,
+    contents: list,
+    config: types.GenerateContentConfig,
+) -> tuple:
+    """Run generate_content in a background thread.
+
+    Returns (response, cancelled). Pressing Escape while waiting sets cancelled=True
+    and returns (None, True); the background thread finishes silently and is discarded.
+    """
+    result: list = [None]
+    exc: list = [None]
+    done = threading.Event()
+
+    def _worker():
+        try:
+            result[0] = client.models.generate_content(
+                model=MODEL_NAME, contents=contents, config=config
+            )
+        except Exception as e:
+            exc[0] = e
+        finally:
+            done.set()
+
+    threading.Thread(target=_worker, daemon=True).start()
+
+    try:
+        import msvcrt  # Windows
+        def _escape_pressed() -> bool:
+            return msvcrt.kbhit() and msvcrt.getch() == b"\x1b"
+    except ImportError:
+        import select, tty, termios  # Unix
+        def _escape_pressed() -> bool:
+            fd = sys.stdin.fileno()
+            old = termios.tcgetattr(fd)
+            try:
+                tty.setraw(fd)
+                return bool(select.select([sys.stdin], [], [], 0)[0]) and sys.stdin.read(1) == "\x1b"
+            except Exception:
+                return False
+            finally:
+                termios.tcsetattr(fd, termios.TCSADRAIN, old)
+
+    while not done.wait(timeout=0.05):
+        if _escape_pressed():
+            return None, True
+
+    if exc[0]:
+        raise exc[0]
+    return result[0], False
+
+
 def run_agent(client: genai.Client, project_id: str, vagent_content: str) -> None:
     chat_history: list[types.Content] = []
     print_environment_header(project_id, vagent_content)
@@ -884,19 +937,22 @@ def run_agent(client: genai.Client, project_id: str, vagent_content: str) -> Non
             turn_start = time.monotonic()
             error_counts: dict[str, int] = {}
             while True:
+                config = types.GenerateContentConfig(
+                    system_instruction=_SYSTEM_INSTRUCTION,
+                    tools=[local_tools, _google_search_tool],
+                    temperature=TEMPERATURE,
+                )
+                status = console.status(
+                    "[bold medium_purple1]Agent is thinking...[/bold medium_purple1]  "
+                    "[dim](Esc to cancel)[/dim]",
+                    spinner="dots",
+                )
+                status.start()
                 try:
-                    with console.status("[bold medium_purple1]Agent is thinking...[/bold medium_purple1]", spinner="dots"):
-                        response = client.models.generate_content(
-                            model=MODEL_NAME,
-                            contents=chat_history,
-                            config=types.GenerateContentConfig(
-                                system_instruction=_SYSTEM_INSTRUCTION,
-                                tools=[local_tools, _google_search_tool],
-                                temperature=TEMPERATURE,
-                            ),
-                        )
+                    response, cancelled = _generate_with_cancel(client, chat_history, config)
                 except Exception as api_err:
-                    chat_history.pop()  # remove the user turn we just appended
+                    status.stop()
+                    chat_history.pop()
                     err_str = str(api_err)
                     status_line = err_str.split("{")[0].strip().rstrip(".")
                     human_msg = getattr(api_err, "message", "") or ""
@@ -906,6 +962,13 @@ def run_agent(client: genai.Client, project_id: str, vagent_content: str) -> Non
                     console.print(
                         Panel(body, title="[bold red]✘ API Error[/bold red]", border_style="red")
                     )
+                    break
+                finally:
+                    status.stop()
+
+                if cancelled:
+                    chat_history.pop()
+                    console.print("[dim]Cancelled.[/dim]")
                     break
 
                 candidate = response.candidates[0]
