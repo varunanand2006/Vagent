@@ -268,6 +268,54 @@ def execute_bash(command: str) -> str:
         return f"ERROR: {type(e).__name__} - {e}"
 
 
+def glob_files(pattern: str, path: str = ".") -> str:
+    try:
+        base = Path(path)
+        matches = sorted(str(p) for p in base.glob(pattern))
+        if not matches:
+            return f"No files matched pattern {pattern!r} in {path!r}"
+        MAX = 500
+        truncated = len(matches) > MAX
+        result = "\n".join(matches[:MAX])
+        if truncated:
+            result += f"\n... ({len(matches) - MAX} more results not shown)"
+        return result
+    except Exception as e:
+        return f"ERROR: {type(e).__name__} - {e}"
+
+
+def grep_files(pattern: str, path: str = ".", glob: str = "**/*") -> str:
+    try:
+        regex = re.compile(pattern)
+    except re.error as e:
+        return f"ERROR: Invalid regex - {e}"
+    try:
+        base = Path(path)
+        results: list[str] = []
+        MAX = 200
+        for filepath in sorted(base.glob(glob)):
+            if not filepath.is_file():
+                continue
+            try:
+                lines = filepath.read_text(encoding="utf-8", errors="ignore").splitlines()
+            except Exception:
+                continue
+            for i, line in enumerate(lines, 1):
+                if regex.search(line):
+                    results.append(f"{filepath}:{i}: {line}")
+                    if len(results) >= MAX:
+                        break
+            if len(results) >= MAX:
+                break
+        if not results:
+            return f"No matches for pattern {pattern!r}"
+        if len(results) == MAX:
+            results.append(f"... (result limit of {MAX} reached, try a more specific pattern or path)")
+        return "\n".join(results)
+    except Exception as e:
+        return f"ERROR: {type(e).__name__} - {e}"
+
+
 # ---------------------------------------------------------------------------
 # Vertex AI Tool definitions
 # ---------------------------------------------------------------------------
@@ -341,12 +389,62 @@ _execute_bash_declaration = types.FunctionDeclaration(
     ),
 )
 
+_glob_files_declaration = types.FunctionDeclaration(
+    name="glob_files",
+    description=(
+        "Find files on the local filesystem matching a glob pattern. "
+        "Supports ** for recursive matching (e.g. '**/*.py'). Returns a list of matching paths."
+    ),
+    parameters=types.Schema(
+        type=types.Type.OBJECT,
+        properties={
+            "pattern": types.Schema(
+                type=types.Type.STRING,
+                description="Glob pattern to match, e.g. '**/*.py' or 'src/*.ts'.",
+            ),
+            "path": types.Schema(
+                type=types.Type.STRING,
+                description="Base directory to search from. Defaults to '.' (current directory).",
+            ),
+        },
+        required=["pattern"],
+    ),
+)
+
+_grep_files_declaration = types.FunctionDeclaration(
+    name="grep_files",
+    description=(
+        "Search file contents for lines matching a regex pattern. "
+        "Returns matching lines with their file path and line number."
+    ),
+    parameters=types.Schema(
+        type=types.Type.OBJECT,
+        properties={
+            "pattern": types.Schema(
+                type=types.Type.STRING,
+                description="Regular expression pattern to search for.",
+            ),
+            "path": types.Schema(
+                type=types.Type.STRING,
+                description="Directory or file to search in. Defaults to '.' (current directory).",
+            ),
+            "glob": types.Schema(
+                type=types.Type.STRING,
+                description="Glob pattern to filter which files are searched, e.g. '**/*.py'. Defaults to '**/*' (all files).",
+            ),
+        },
+        required=["pattern"],
+    ),
+)
+
 local_tools = types.Tool(
     function_declarations=[
         _read_file_declaration,
         _write_file_declaration,
         _execute_bash_declaration,
         _list_directory_declaration,
+        _glob_files_declaration,
+        _grep_files_declaration,
     ]
 )
 
@@ -355,6 +453,8 @@ TOOL_DISPATCH = {
     "write_file": lambda args: write_file(**args),
     "execute_bash": lambda args: execute_bash(**args),
     "list_directory": lambda args: list_directory(**args),
+    "glob_files": lambda args: glob_files(**args),
+    "grep_files": lambda args: grep_files(**args),
 }
 
 # ---------------------------------------------------------------------------
@@ -676,7 +776,7 @@ def run_agent(client: genai.Client, project_id: str, vagent_content: str) -> Non
                     break
 
                 # ── Tool execution turn ───────────────────────────────────
-                _SILENT_TOOLS = {"read_file", "list_directory"}
+                _SILENT_TOOLS = {"read_file", "list_directory", "glob_files", "grep_files"}
                 function_response_parts: list[types.Part] = []
                 stuck = False
                 for fc in function_calls:
@@ -689,8 +789,8 @@ def run_agent(client: genai.Client, project_id: str, vagent_content: str) -> Non
                     elif fn_name == "execute_bash":
                         cmd_display = fn_args.get("command", "?")
                         console.print(f"\n[bold white on medium_purple1] ❯ RUN [/bold white on medium_purple1] [bold white] {cmd_display} [/bold white]")
-                    elif fn_name == "read_file":
-                        console.print(f"[gray50]• read_file...[/gray50]", end="\r")
+                    elif fn_name in {"read_file", "glob_files", "grep_files"}:
+                        console.print(f"[gray50]• {fn_name}...[/gray50]", end="\r")
 
                     handler = TOOL_DISPATCH.get(fn_name)
                     if handler is None:
@@ -700,7 +800,7 @@ def run_agent(client: genai.Client, project_id: str, vagent_content: str) -> Non
 
                     if result.startswith("ERROR:"):
                         error_counts[fn_name] = error_counts.get(fn_name, 0) + 1
-                        if fn_name == "read_file":
+                        if fn_name in {"read_file", "glob_files", "grep_files"}:
                             console.print(" " * 40, end="\r")  # clear the running line
                         console.print(f"[dodger_blue1]•[/dodger_blue1] [dim white]{fn_name}[/dim white] [bright_red]✘[/bright_red]")
                         console.print(
