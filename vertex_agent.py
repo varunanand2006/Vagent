@@ -7,9 +7,9 @@ import sys
 import time
 from pathlib import Path
 
-from google import genai
+import anthropic
+from anthropic import AnthropicVertex
 from google.auth import default as google_auth_default
-from google.genai import types
 from prompt_toolkit import PromptSession
 from prompt_toolkit.formatted_text import HTML
 from prompt_toolkit.key_binding import KeyBindings
@@ -25,8 +25,8 @@ from rich.text import Text
 
 console = Console()
 DRY_RUN: bool = False
-MODEL_NAME = "gemini-2.5-flash"
-LOCATION = "us-central1"
+MODEL_NAME = "claude-sonnet-4-6"
+REGION = "global"
 _SYSTEM_INSTRUCTION: str | None = None
 
 
@@ -107,7 +107,6 @@ def _render_file_diff(
 
     for hunk_idx, hunk in enumerate(hunks):
         if hunk_idx > 0:
-            # Separator between non-adjacent change groups
             console.print(Text(f" {'···':>{gutter_w + 4}}", style="gray50"))
 
         old_ln = hunk["old_start"]
@@ -135,7 +134,6 @@ def _render_file_diff(
                 old_ln += 1
                 total_changed += 1
             else:
-                # context line (starts with a space)
                 gn = str(new_ln).rjust(gutter_w)
                 t.append(f" {gn}   ", style="#d0d0d0")
                 t.append(raw_content, style="#d0d0d0")
@@ -269,86 +267,76 @@ def execute_bash(command: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Vertex AI Tool definitions
+# Anthropic tool definitions
 # ---------------------------------------------------------------------------
 
-_read_file_declaration = types.FunctionDeclaration(
-    name="read_file",
-    description="Read the full text contents of a file on the local filesystem.",
-    parameters=types.Schema(
-        type=types.Type.OBJECT,
-        properties={
-            "filepath": types.Schema(
-                type=types.Type.STRING,
-                description="Absolute or relative path to the file to read.",
-            ),
+local_tools = [
+    {
+        "name": "read_file",
+        "description": "Read the full text contents of a file on the local filesystem.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "filepath": {
+                    "type": "string",
+                    "description": "Absolute or relative path to the file to read.",
+                },
+            },
+            "required": ["filepath"],
         },
-        required=["filepath"],
-    ),
-)
-
-_write_file_declaration = types.FunctionDeclaration(
-    name="write_file",
-    description=(
-        "Write (overwrite) a file on the local filesystem with the given content. "
-        "The user will be prompted to confirm before the write occurs."
-    ),
-    parameters=types.Schema(
-        type=types.Type.OBJECT,
-        properties={
-            "filepath": types.Schema(
-                type=types.Type.STRING,
-                description="Absolute or relative path to the file to write.",
-            ),
-            "content": types.Schema(
-                type=types.Type.STRING,
-                description="Full text content to write into the file.",
-            ),
+    },
+    {
+        "name": "write_file",
+        "description": (
+            "Write (overwrite) a file on the local filesystem with the given content. "
+            "The user will be prompted to confirm before the write occurs."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "filepath": {
+                    "type": "string",
+                    "description": "Absolute or relative path to the file to write.",
+                },
+                "content": {
+                    "type": "string",
+                    "description": "Full text content to write into the file.",
+                },
+            },
+            "required": ["filepath", "content"],
         },
-        required=["filepath", "content"],
-    ),
-)
-
-_list_directory_declaration = types.FunctionDeclaration(
-    name="list_directory",
-    description="List the files and folders inside a directory on the local filesystem.",
-    parameters=types.Schema(
-        type=types.Type.OBJECT,
-        properties={
-            "path": types.Schema(
-                type=types.Type.STRING,
-                description="Absolute or relative path to the directory. Defaults to '.' (current directory).",
-            ),
+    },
+    {
+        "name": "list_directory",
+        "description": "List the files and folders inside a directory on the local filesystem.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Absolute or relative path to the directory. Defaults to '.' (current directory).",
+                },
+            },
         },
-    ),
-)
-
-_execute_bash_declaration = types.FunctionDeclaration(
-    name="execute_bash",
-    description=(
-        "Execute a shell command on the local machine and return its stdout/stderr. "
-        "The user will be prompted to confirm before the command runs."
-    ),
-    parameters=types.Schema(
-        type=types.Type.OBJECT,
-        properties={
-            "command": types.Schema(
-                type=types.Type.STRING,
-                description="The shell command to execute.",
-            ),
+    },
+    {
+        "name": "execute_bash",
+        "description": (
+            "Execute a shell command on the local machine and return its stdout/stderr. "
+            "The user will be prompted to confirm before the command runs."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "command": {
+                    "type": "string",
+                    "description": "The shell command to execute.",
+                },
+            },
+            "required": ["command"],
         },
-        required=["command"],
-    ),
-)
-
-local_tools = types.Tool(
-    function_declarations=[
-        _read_file_declaration,
-        _write_file_declaration,
-        _execute_bash_declaration,
-        _list_directory_declaration,
-    ]
-)
+    },
+]
 
 TOOL_DISPATCH = {
     "read_file": lambda args: read_file(**args),
@@ -369,65 +357,49 @@ _SUMMARIZE_PROMPT = (
 
 
 def compact_history(
-    chat_history: list[types.Content], client: genai.Client
-) -> list[types.Content]:
+    chat_history: list[dict], client: AnthropicVertex
+) -> list[dict]:
     if len(chat_history) < 2:
         console.print("[dim]Nothing substantial to compact.[/dim]")
         return chat_history
 
-    base = chat_history[:-1] if chat_history[-1].role == "user" else chat_history
+    base = chat_history[:-1] if chat_history[-1]["role"] == "user" else chat_history
     if len(base) < 2:
         console.print("[dim]Nothing substantial to compact.[/dim]")
         return chat_history
 
-    summarize_request = base + [
-        types.Content(role="user", parts=[types.Part(text=_SUMMARIZE_PROMPT)])
-    ]
+    summarize_request = base + [{"role": "user", "content": _SUMMARIZE_PROMPT}]
 
     with console.status("[bold dodger_blue1]Compacting history...[/bold dodger_blue1]", spinner="dots"):
-        summary_response = client.models.generate_content(
-            model=MODEL_NAME,
-            contents=summarize_request,
-            config=types.GenerateContentConfig(
-                system_instruction=_SYSTEM_INSTRUCTION,
-                tool_config=types.ToolConfig(
-                    function_calling_config=types.FunctionCallingConfig(mode="NONE"),
-                ),
-            ),
-        )
-
-    if (
-        not summary_response.candidates
-        or not summary_response.candidates[0].content
-        or not summary_response.candidates[0].content.parts
-    ):
-        console.print("[bold red]Compaction failed: model returned an empty response. History unchanged.[/bold red]")
-        return chat_history
+        try:
+            create_kwargs: dict = dict(model=MODEL_NAME, max_tokens=1024, messages=summarize_request)
+            if _SYSTEM_INSTRUCTION:
+                create_kwargs["system"] = _SYSTEM_INSTRUCTION
+            summary_response = client.messages.create(**create_kwargs)
+        except Exception as e:
+            console.print(f"[bold red]Compaction failed: {markup_escape(str(e))}. History unchanged.[/bold red]")
+            return chat_history
 
     summary_text = "\n".join(
-        p.text for p in summary_response.candidates[0].content.parts if p.text
+        b.text for b in summary_response.content if b.type == "text"
     )
     if not summary_text:
         console.print("[bold red]Compaction failed: model returned no text. History unchanged.[/bold red]")
         return chat_history
 
-    last_turn: list[types.Content] = []
+    last_turn: list[dict] = []
     if len(chat_history) >= 2:
         prev, last = chat_history[-2], chat_history[-1]
-        prev_is_user_text = prev.role == "user" and any(p.text for p in prev.parts)
-        last_is_model_text = last.role == "model" and any(p.text for p in last.parts)
-        if prev_is_user_text and last_is_model_text:
+        if prev["role"] == "user" and last["role"] == "assistant":
             last_turn = [prev, last]
 
     compacted = [
-        types.Content(role="user", parts=[types.Part(text=f"[Summary of prior conversation]:\n{summary_text}")]),
-        types.Content(role="model", parts=[types.Part(text="Understood. I have the full context from our previous work.")]),
+        {"role": "user", "content": f"[Summary of prior conversation]:\n{summary_text}"},
+        {"role": "assistant", "content": "Understood. I have the full context from our previous work."},
         *last_turn,
     ]
 
-    console.print(
-        f"[gray50]Compacted {len(chat_history)} → {len(compacted)} turns.[/gray50]"
-    )
+    console.print(f"[gray50]Compacted {len(chat_history)} → {len(compacted)} turns.[/gray50]")
     return compacted
 
 
@@ -459,15 +431,11 @@ def render_response(text: str) -> None:
 # Initialization
 # ---------------------------------------------------------------------------
 
-def init_vertex() -> tuple[genai.Client, str, str]:
+def init_vertex() -> tuple[AnthropicVertex, str, str]:
     """Authenticate via ADC, load optional .vagent context, return (client, project_id, vagent_content)."""
     global _SYSTEM_INSTRUCTION
 
     credentials, project_id = google_auth_default()
-    # google.auth.default() returns None for the project when using user
-    # credentials (gcloud ADC). Fall back to the quota_project_id that
-    # `gcloud auth application-default login --project` writes into the
-    # ADC file, then to the GOOGLE_CLOUD_PROJECT env var.
     if not project_id:
         project_id = getattr(credentials, "quota_project_id", None)
     if not project_id:
@@ -479,7 +447,6 @@ def init_vertex() -> tuple[genai.Client, str, str]:
             "or: set GOOGLE_CLOUD_PROJECT=YOUR_PROJECT"
         )
 
-    # Load project-specific context from .vagent in the current directory.
     vagent_content = ""
     vagent_path = Path(".vagent")
     if vagent_path.exists():
@@ -490,7 +457,7 @@ def init_vertex() -> tuple[genai.Client, str, str]:
         except Exception as e:
             console.print(f"[dim yellow]Warning: could not read .vagent: {e}[/dim yellow]")
 
-    client = genai.Client(vertexai=True, project=project_id, location=LOCATION)
+    client = AnthropicVertex(project_id=project_id, region=REGION)
     return client, project_id, vagent_content
 
 
@@ -499,7 +466,7 @@ def init_vertex() -> tuple[genai.Client, str, str]:
 # ---------------------------------------------------------------------------
 
 def print_environment_header(project_id: str, vagent_content: str) -> None:
-    tool_count = len(local_tools.function_declarations)
+    tool_count = len(local_tools)
     mode = "[bold yellow]DRY RUN[/bold yellow]" if DRY_RUN else "[bold dodger_blue1]Normal[/bold dodger_blue1]"
     vagent_status = "[bold dodger_blue1]Loaded[/bold dodger_blue1]" if vagent_content else "[gray50]None[/gray50]"
 
@@ -508,6 +475,7 @@ def print_environment_header(project_id: str, vagent_content: str) -> None:
     grid.add_column()
     grid.add_row("Current Path:", os.getcwd())
     grid.add_row("GCP Project:", f"[bold]{project_id}[/bold]")
+    grid.add_row("Model:", MODEL_NAME)
     grid.add_row("Tool Count:", str(tool_count))
     grid.add_row("Mode:", mode)
     grid.add_row(".vagent:", vagent_status)
@@ -529,12 +497,12 @@ def print_help() -> None:
     tools_table.add_column("Tool", style="bold #0087ff", no_wrap=True)
     tools_table.add_column("Safety Gate")
     tools_table.add_column("Description")
-    for decl in local_tools.function_declarations:
-        if decl.name in {"read_file", "list_directory"}:
+    for tool in local_tools:
+        if tool["name"] in {"read_file", "list_directory"}:
             gate = "[dim]None (read-only)[/dim]"
         else:
             gate = "[yellow]Confirm [Y/n][/yellow]"
-        tools_table.add_row(decl.name, gate, (decl.description or "").split(".")[0])
+        tools_table.add_row(tool["name"], gate, tool["description"].split(".")[0])
 
     console.print(Panel(cmd_table, title="[bold dodger_blue1]Slash Commands[/bold dodger_blue1]", border_style="dim dodger_blue1"))
     console.print(Panel(tools_table, title="[bold medium_purple1]Active Tools[/bold medium_purple1]", border_style="dim medium_purple1"))
@@ -558,8 +526,8 @@ def _build_prompt_session() -> PromptSession:
     )
 
 
-def run_agent(client: genai.Client, project_id: str, vagent_content: str) -> None:
-    chat_history: list[types.Content] = []
+def run_agent(client: AnthropicVertex, project_id: str, vagent_content: str) -> None:
+    chat_history: list[dict] = []
     print_environment_header(project_id, vagent_content)
     prompt_session = _build_prompt_session()
 
@@ -601,73 +569,66 @@ def run_agent(client: genai.Client, project_id: str, vagent_content: str) -> Non
                     )
                 continue
 
-            chat_history.append(types.Content(role="user", parts=[types.Part(text=user_text)]))
+            chat_history.append({"role": "user", "content": user_text})
 
             # ── Agentic loop (handles multi-step tool chains) ─────────────
             turn_start = time.monotonic()
             error_counts: dict[str, int] = {}
             while True:
                 try:
+                    create_kwargs: dict = dict(
+                        model=MODEL_NAME,
+                        max_tokens=8096,
+                        messages=chat_history,
+                        tools=local_tools,
+                    )
+                    if _SYSTEM_INSTRUCTION:
+                        create_kwargs["system"] = _SYSTEM_INSTRUCTION
+
                     with console.status("[bold medium_purple1]Agent is thinking...[/bold medium_purple1]", spinner="dots"):
-                        response = client.models.generate_content(
-                            model=MODEL_NAME,
-                            contents=chat_history,
-                            config=types.GenerateContentConfig(
-                                system_instruction=_SYSTEM_INSTRUCTION,
-                                tools=[local_tools],
-                            ),
-                        )
+                        response = client.messages.create(**create_kwargs)
                 except Exception as api_err:
-                    chat_history.pop()  # remove the user turn we just appended
-                    # ClientError str is "403 STATUS. {giant json blob}".
-                    # Show the status line and the nested human-readable message separately.
+                    chat_history.pop()
                     err_str = str(api_err)
-                    status_line = err_str.split("{")[0].strip().rstrip(".")
+                    status_line = err_str.split("\n")[0].strip()
                     human_msg = getattr(api_err, "message", "") or ""
                     body = f"[bold]{markup_escape(status_line)}[/bold]"
-                    if human_msg:
+                    if human_msg and human_msg != status_line:
                         body += f"\n\n{markup_escape(human_msg)}"
                     console.print(
                         Panel(body, title="[bold red]✘ API Error[/bold red]", border_style="red")
                     )
                     break
 
-                candidate = response.candidates[0]
+                # Serialise response content to dicts for history storage
+                content_dicts: list[dict] = []
+                for block in response.content:
+                    if block.type == "text":
+                        content_dicts.append({"type": "text", "text": block.text})
+                    elif block.type == "tool_use":
+                        content_dicts.append({
+                            "type": "tool_use",
+                            "id": block.id,
+                            "name": block.name,
+                            "input": dict(block.input),
+                        })
 
-                # Guard: safety-blocked or otherwise empty responses have no parts.
-                if not candidate.content or not candidate.content.parts:
-                    console.print(
-                        Panel(
-                            "The model returned an empty or blocked response.",
-                            title="[bold red]✘ Empty Response[/bold red]",
-                            border_style="red",
-                        )
-                    )
-                    break
+                chat_history.append({"role": "assistant", "content": content_dicts})
 
-                chat_history.append(candidate.content)
+                tool_use_blocks = [b for b in response.content if b.type == "tool_use"]
 
-                # In google-genai, part.function_call is None when not a tool call.
-                function_calls = [
-                    part.function_call
-                    for part in candidate.content.parts
-                    if part.function_call and part.function_call.name
-                ]
-
-                if not function_calls:
+                if not tool_use_blocks:
                     # ── Text response ─────────────────────────────────────
-                    text = "\n".join(
-                        p.text for p in candidate.content.parts if p.text
-                    )
+                    text = "\n".join(b.text for b in response.content if b.type == "text")
                     if not text:
                         console.print("[dim]Model returned no text.[/dim]")
                         break
                     console.print()
-                    console.print(Rule("[italic gray50]Gemini[/italic gray50]", style="dim medium_purple1"))
+                    console.print(Rule("[italic gray50]Claude[/italic gray50]", style="dim medium_purple1"))
                     console.print()
                     render_response(text)
                     console.print()
-                    total_tokens = response.usage_metadata.total_token_count
+                    total_tokens = response.usage.input_tokens + response.usage.output_tokens
                     turn_time = time.monotonic() - turn_start
                     console.print(f"[gray50]✦ Calculated... ({turn_time:.1f}s • {total_tokens:,} tokens)[/gray50]")
 
@@ -682,11 +643,12 @@ def run_agent(client: genai.Client, project_id: str, vagent_content: str) -> Non
 
                 # ── Tool execution turn ───────────────────────────────────
                 _SILENT_TOOLS = {"read_file", "list_directory"}
-                function_response_parts: list[types.Part] = []
+                tool_result_parts: list[dict] = []
                 stuck = False
-                for fc in function_calls:
-                    fn_name = fc.name
-                    fn_args = dict(fc.args)
+
+                for tu in tool_use_blocks:
+                    fn_name = tu.name
+                    fn_args = dict(tu.input)
 
                     if fn_name == "write_file":
                         fp_display = fn_args.get("filepath", "?")
@@ -706,7 +668,7 @@ def run_agent(client: genai.Client, project_id: str, vagent_content: str) -> Non
                     if result.startswith("ERROR:"):
                         error_counts[fn_name] = error_counts.get(fn_name, 0) + 1
                         if fn_name == "read_file":
-                            console.print(" " * 40, end="\r")  # clear the running line
+                            console.print(" " * 40, end="\r")
                         console.print(f"[dodger_blue1]•[/dodger_blue1] [dim white]{fn_name}[/dim white] [bright_red]✘[/bright_red]")
                         console.print(
                             Panel(
@@ -728,25 +690,22 @@ def run_agent(client: genai.Client, project_id: str, vagent_content: str) -> Non
                         elif fn_name == "execute_bash":
                             console.print(f"[dodger_blue1]•[/dodger_blue1] [dim white]{fn_name}[/dim white] [bright_green]✔[/bright_green]")
 
-                    function_response_parts.append(
-                        types.Part(
-                            function_response=types.FunctionResponse(
-                                name=fn_name,
-                                response={"content": result},
-                            )
-                        )
-                    )
+                    tool_result_parts.append({
+                        "type": "tool_result",
+                        "tool_use_id": tu.id,
+                        "content": result,
+                    })
 
                 if stuck:
-                    # The model's unanswered function-call turn is already in
-                    # chat_history. Remove it so the next user message doesn't
-                    # produce an invalid role sequence (model:fn_call → user:text).
+                    # Remove the unanswered tool-call turn so the next user
+                    # message doesn't produce an invalid role sequence.
                     chat_history.pop()
                     break
 
-                chat_history.append(
-                    types.Content(role="user", parts=function_response_parts)
-                )
+                chat_history.append({
+                    "role": "user",
+                    "content": tool_result_parts,
+                })
 
     except KeyboardInterrupt:
         console.print("\n[bold yellow]Agent shutting down. Goodbye![/bold yellow]")
