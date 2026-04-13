@@ -26,7 +26,7 @@ from rich.text import Text
 console = Console()
 DRY_RUN: bool = False
 MODEL_NAME = "claude-sonnet-4-6"
-REGION = "global"
+REGION = "us-east5"
 _SYSTEM_INSTRUCTION: str | None = None
 
 
