@@ -1081,7 +1081,7 @@ def init_vertex() -> tuple[genai.Client, str, str]:
 # Display helpers
 # ---------------------------------------------------------------------------
 
-def print_environment_header(project_id: str, vagent_content: str) -> None:
+def print_environment_header(vagent_content: str) -> None:
     tool_count = len(local_tools.function_declarations)
     mode = "[bold yellow]DRY RUN[/bold yellow]" if DRY_RUN else "[bold dodger_blue1]Normal[/bold dodger_blue1]"
     vagent_status = "[bold dodger_blue1]Loaded[/bold dodger_blue1]" if vagent_content else "[gray50]None[/gray50]"
@@ -1090,9 +1090,7 @@ def print_environment_header(project_id: str, vagent_content: str) -> None:
     grid.add_column(style="dim", no_wrap=True)
     grid.add_column()
     grid.add_row("Current Path:", os.getcwd())
-    grid.add_row("GCP Project:", f"[bold]{project_id}[/bold]")
     grid.add_row("Model:", MODEL_NAME)
-    grid.add_row("Temperature:", str(TEMPERATURE))
     grid.add_row("Tool Count:", str(tool_count))
     grid.add_row("Mode:", mode)
     grid.add_row(".vagent:", vagent_status)
@@ -1197,7 +1195,7 @@ def _generate_with_cancel(
 
 def run_agent(client: genai.Client, project_id: str, vagent_content: str) -> None:
     chat_history: list[types.Content] = []
-    print_environment_header(project_id, vagent_content)
+    print_environment_header(vagent_content)
     prompt_session = _build_prompt_session()
 
     try:
