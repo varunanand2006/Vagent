@@ -33,7 +33,11 @@ vagent --dry-run
 
 ## Features
 
-- **Local Tool Execution:** The agent can execute local tools on your machine, such as reading and writing files, executing shell commands, and listing directory contents.
+- **Local Tool Execution:** The agent can execute local tools on your machine, such as reading and writing files, executing shell commands, and listing directory contents. The available tools are:
+    - `read_file`: Read the full text contents of a file on the local filesystem.
+    - `write_file`: Write (overwrite) a file on the local filesystem with the given content.
+    - `execute_bash`: Execute a shell command on the local machine and return its stdout/stderr.
+    - `list_directory`: List the files and folders inside a directory on the local filesystem.
 - **Confirmation Prompt:** For security, the agent will prompt for confirmation before executing potentially dangerous commands like `write_file` and `execute_bash`.
 - **Dry-Run Mode:** You can run the agent in dry-run mode to see what commands it would execute without actually making any changes to your system.
 - **History Compaction:** The agent can automatically compact the conversation history to stay within the model's token limit.
@@ -47,17 +51,6 @@ vagent --dry-run
 - `rich>=13.0.0`
 - `prompt_toolkit>=3.0.0`
 
-## Available Tools
-
-The agent has access to the following local tools:
-
-| Tool             | Description                                                                                                   |
-| ---------------- | ------------------------------------------------------------------------------------------------------------- |
-| `read_file`      | Read the full text contents of a file on the local filesystem.                                                |
-| `write_file`     | Write (overwrite) a file on the local filesystem with the given content.                                      |
-| `execute_bash`   | Execute a shell command on the local machine and return its stdout/stderr.                                    |
-| `list_directory` | List the files and folders inside a directory on the local filesystem.                                        |
-
 ## Slash Commands
 
 The following slash commands are available:
@@ -68,4 +61,3 @@ The following slash commands are available:
 | `/clear`    | Wipe the conversation history              |
 | `/compact`  | Summarise and compress history             |
 | `/help` or `?` | Show this help                             |
-
