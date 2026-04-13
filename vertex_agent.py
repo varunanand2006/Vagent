@@ -501,6 +501,22 @@ def git_log(max_entries: int = 10) -> str:
         return f"ERROR: {type(e).__name__} - {e}"
 
 
+def git_add(files: list = None) -> str:
+    if DRY_RUN:
+        console.print(f"[dim][DRY RUN] Would have staged: {' '.join(files) if files else 'all changes'}[/dim]")
+        return "Success"
+    if not _confirm_execution(f"[bold #ffffd7]git_add({', '.join(files) if files else 'all'})[/bold #ffffd7]"):
+        return "Execution blocked by user."
+    try:
+        cmd = ["git", "add"] + (files if files else ["-A"])
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        if r.returncode != 0:
+            return f"ERROR: {r.stderr.strip()}"
+        return r.stdout.strip() or "Staged successfully."
+    except Exception as e:
+        return f"ERROR: {type(e).__name__} - {e}"
+
+
 def git_commit(message: str, files: list = None) -> str:
     if DRY_RUN:
         console.print(f"[dim][DRY RUN] Would have committed with message {message!r}[/dim]")
@@ -781,6 +797,24 @@ _git_log_declaration = types.FunctionDeclaration(
     ),
 )
 
+_git_add_declaration = types.FunctionDeclaration(
+    name="git_add",
+    description=(
+        "Stage files for the next commit. If files is omitted, stages all changes (git add -A). "
+        "The user will be prompted to confirm."
+    ),
+    parameters=types.Schema(
+        type=types.Type.OBJECT,
+        properties={
+            "files": types.Schema(
+                type=types.Type.ARRAY,
+                items=types.Schema(type=types.Type.STRING),
+                description="Specific files to stage. Omit to stage all changes.",
+            ),
+        },
+    ),
+)
+
 _git_commit_declaration = types.FunctionDeclaration(
     name="git_commit",
     description=(
@@ -883,6 +917,7 @@ local_tools = types.Tool(
         _git_status_declaration,
         _git_diff_declaration,
         _git_log_declaration,
+        _git_add_declaration,
         _git_commit_declaration,
     ]
 )
@@ -901,6 +936,7 @@ TOOL_DISPATCH = {
     "git_status": lambda args: git_status(**args),
     "git_diff": lambda args: git_diff(**args),
     "git_log": lambda args: git_log(**args),
+    "git_add": lambda args: git_add(**args),
     "git_commit": lambda args: git_commit(**args),
 }
 
@@ -1322,6 +1358,9 @@ def run_agent(client: genai.Client, project_id: str, vagent_content: str) -> Non
                     elif fn_name == "edit_file":
                         fp_display = fn_args.get("filepath", "?")
                         console.print(f"\n[bold white on dodger_blue1] ✎ EDIT [/bold white on dodger_blue1] [bold white] {fp_display} [/bold white]")
+                    elif fn_name == "git_add":
+                        files_display = ", ".join(fn_args.get("files") or ["all"])
+                        console.print(f"\n[bold white on green4] ⎇ ADD [/bold white on green4] [bold white] {files_display} [/bold white]")
                     elif fn_name == "git_commit":
                         msg_display = fn_args.get("message", "?")
                         console.print(f"\n[bold white on green4] ⎇ COMMIT [/bold white on green4] [bold white] {msg_display} [/bold white]")
