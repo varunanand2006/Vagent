@@ -934,7 +934,7 @@ local_tools = types.Tool(
         _git_diff_declaration,
         _git_log_declaration,
         _git_add_declaration,
-        _git_commit_declaration,
+        _git_commit_declaration
     ]
 )
 
@@ -953,7 +953,7 @@ TOOL_DISPATCH = {
     "git_diff": lambda args: git_diff(**args),
     "git_log": lambda args: git_log(**args),
     "git_add": lambda args: git_add(**args),
-    "git_commit": lambda args: git_commit(**args),
+    "git_commit": lambda args: git_commit(**args)
 }
 
 # ---------------------------------------------------------------------------
