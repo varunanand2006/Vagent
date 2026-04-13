@@ -46,8 +46,11 @@ accurately rather than guessing.
 - Always call glob_files or list_directory to orient yourself before assuming a \
 project's structure.
 - Always call grep_files to locate relevant code before reading entire files.
-- Always call read_file before write_file on any file that already exists. \
-Never reconstruct file contents from memory.
+- Always call read_file before touching any existing file.
+- Prefer edit_file over write_file for changes to existing files — it is faster, \
+uses fewer tokens, and is less likely to introduce unintended changes. Only use \
+write_file when creating a new file or replacing it entirely.
+- Never reconstruct file contents from memory.
 - Prefer execute_bash_background for commands that may take more than a few seconds \
 (builds, installs, test suites). Poll with get_job_output until they finish.
 - Use fetch_url when you need current documentation, package versions, or \
@@ -239,6 +242,60 @@ def write_file(filepath: str, content: str) -> str:
     return f"Successfully wrote {len(content)} bytes to {filepath!r}."
 
 
+def edit_file(filepath: str, old_string: str, new_string: str) -> str:
+    fp = Path(filepath)
+    if not fp.exists():
+        return f"ERROR: FileNotFound - '{filepath}' does not exist. Use write_file to create new files."
+    if str(fp.resolve()) not in _read_files:
+        return (
+            f"ERROR: ReadRequired - '{filepath}' must be read before it can be edited. "
+            "Call read_file first."
+        )
+    if DRY_RUN:
+        console.print(f"[dim][DRY RUN] Would have edited {filepath!r}[/dim]")
+        return "Success"
+
+    try:
+        content = fp.read_text(encoding="utf-8")
+    except Exception as e:
+        return f"ERROR: {type(e).__name__} - {e}"
+
+    count = content.count(old_string)
+    if count == 0:
+        return (
+            f"ERROR: StringNotFound - The exact string was not found in '{filepath}'. "
+            "Call read_file again to get the latest contents, then retry with the exact text including correct whitespace and indentation."
+        )
+    if count > 1:
+        return (
+            f"ERROR: AmbiguousMatch - The string appears {count} times in '{filepath}'. "
+            "Include more surrounding context to make the match unique."
+        )
+
+    new_content = content.replace(old_string, new_string, 1)
+
+    if not _confirm_execution(f"[bold #ffffd7]edit_file({filepath!r})[/bold #ffffd7]"):
+        return "Execution blocked by user."
+
+    try:
+        fp.write_text(new_content, encoding="utf-8")
+    except Exception as e:
+        return f"ERROR: {type(e).__name__} - {e}"
+
+    old_lines = content.splitlines(keepends=True)
+    new_lines = new_content.splitlines(keepends=True)
+    diff_lines = list(difflib.unified_diff(
+        old_lines, new_lines,
+        fromfile=f"a/{filepath}", tofile=f"b/{filepath}",
+        lineterm="", n=3,
+    ))
+    added = sum(1 for l in diff_lines if l.startswith("+") and not l.startswith("+++"))
+    removed = sum(1 for l in diff_lines if l.startswith("-") and not l.startswith("---"))
+    _render_file_diff(diff_lines, filepath, False, added, removed)
+
+    return f"Successfully edited '{filepath}' ({added} lines added, {removed} removed)."
+
+
 def list_directory(path: str = ".") -> str:
     _ICON_MAP = {".py": "🐍", ".txt": "📄", ".json": "⚙️", ".md": "📝"}
     _KIND_MAP = {".py": "Python", ".txt": "Text", ".json": "JSON", ".md": "Markdown"}
@@ -402,6 +459,68 @@ def get_job_output(job_id: str) -> str:
     if not stdout.strip() and not stderr.strip():
         lines.append("(no output yet)")
     return "\n".join(lines)
+
+
+def git_status() -> str:
+    try:
+        r = subprocess.run(["git", "status", "--short", "--branch"], capture_output=True, text=True, timeout=10)
+        if r.returncode != 0:
+            return f"ERROR: {r.stderr.strip() or 'git status failed'}"
+        return r.stdout.strip() or "(clean working tree)"
+    except Exception as e:
+        return f"ERROR: {type(e).__name__} - {e}"
+
+
+def git_diff(filepath: str = "") -> str:
+    try:
+        cmd = ["git", "diff"]
+        if filepath:
+            cmd.append(filepath)
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+        if r.returncode != 0:
+            return f"ERROR: {r.stderr.strip()}"
+        output = r.stdout.strip()
+        MAX = 8_000
+        if len(output) > MAX:
+            output = output[:MAX] + f"\n... (truncated at {MAX} chars)"
+        return output or "(no unstaged changes)"
+    except Exception as e:
+        return f"ERROR: {type(e).__name__} - {e}"
+
+
+def git_log(max_entries: int = 10) -> str:
+    try:
+        r = subprocess.run(
+            ["git", "log", f"--max-count={max_entries}", "--oneline", "--decorate"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if r.returncode != 0:
+            return f"ERROR: {r.stderr.strip()}"
+        return r.stdout.strip() or "(no commits)"
+    except Exception as e:
+        return f"ERROR: {type(e).__name__} - {e}"
+
+
+def git_commit(message: str, files: list = None) -> str:
+    if DRY_RUN:
+        console.print(f"[dim][DRY RUN] Would have committed with message {message!r}[/dim]")
+        return "Success"
+    if not _confirm_execution(f"[bold #ffffd7]git_commit({message!r})[/bold #ffffd7]"):
+        return "Execution blocked by user."
+    try:
+        stage_cmd = ["git", "add"] + (files if files else ["-A"])
+        r = subprocess.run(stage_cmd, capture_output=True, text=True, timeout=10)
+        if r.returncode != 0:
+            return f"ERROR: git add failed: {r.stderr.strip()}"
+        r = subprocess.run(
+            ["git", "commit", "-m", message],
+            capture_output=True, text=True, timeout=10,
+        )
+        if r.returncode != 0:
+            return f"ERROR: git commit failed: {r.stderr.strip()}"
+        return r.stdout.strip()
+    except Exception as e:
+        return f"ERROR: {type(e).__name__} - {e}"
 
 
 def glob_files(pattern: str, path: str = ".") -> str:
@@ -615,6 +734,74 @@ _get_job_output_declaration = types.FunctionDeclaration(
     ),
 )
 
+_edit_file_declaration = types.FunctionDeclaration(
+    name="edit_file",
+    description=(
+        "Make a targeted edit to an existing file by replacing an exact string with new text. "
+        "Prefer this over write_file for modifying existing files — it is faster and token-efficient. "
+        "The old_string must match the file contents exactly (including whitespace and indentation). "
+        "The file must have been read with read_file in this session first."
+    ),
+    parameters=types.Schema(
+        type=types.Type.OBJECT,
+        properties={
+            "filepath": types.Schema(type=types.Type.STRING, description="Path to the file to edit."),
+            "old_string": types.Schema(type=types.Type.STRING, description="The exact string to find and replace. Must be unique within the file."),
+            "new_string": types.Schema(type=types.Type.STRING, description="The string to replace it with."),
+        },
+        required=["filepath", "old_string", "new_string"],
+    ),
+)
+
+_git_status_declaration = types.FunctionDeclaration(
+    name="git_status",
+    description="Show the working tree status (staged, unstaged, and untracked files).",
+    parameters=types.Schema(type=types.Type.OBJECT, properties={}),
+)
+
+_git_diff_declaration = types.FunctionDeclaration(
+    name="git_diff",
+    description="Show unstaged changes as a unified diff. Optionally scoped to a single file.",
+    parameters=types.Schema(
+        type=types.Type.OBJECT,
+        properties={
+            "filepath": types.Schema(type=types.Type.STRING, description="Limit diff to this file. Omit for all changes."),
+        },
+    ),
+)
+
+_git_log_declaration = types.FunctionDeclaration(
+    name="git_log",
+    description="Show recent commit history.",
+    parameters=types.Schema(
+        type=types.Type.OBJECT,
+        properties={
+            "max_entries": types.Schema(type=types.Type.INTEGER, description="Number of commits to show. Defaults to 10."),
+        },
+    ),
+)
+
+_git_commit_declaration = types.FunctionDeclaration(
+    name="git_commit",
+    description=(
+        "Stage files and create a git commit. "
+        "If files is omitted, stages all changes (git add -A). "
+        "The user will be prompted to confirm before the commit is made."
+    ),
+    parameters=types.Schema(
+        type=types.Type.OBJECT,
+        properties={
+            "message": types.Schema(type=types.Type.STRING, description="The commit message."),
+            "files": types.Schema(
+                type=types.Type.ARRAY,
+                items=types.Schema(type=types.Type.STRING),
+                description="Specific files to stage. Omit to stage all changes.",
+            ),
+        },
+        required=["message"],
+    ),
+)
+
 _fetch_url_declaration = types.FunctionDeclaration(
     name="fetch_url",
     description=(
@@ -685,6 +872,7 @@ local_tools = types.Tool(
     function_declarations=[
         _read_file_declaration,
         _write_file_declaration,
+        _edit_file_declaration,
         _execute_bash_declaration,
         _execute_bash_background_declaration,
         _get_job_output_declaration,
@@ -692,12 +880,17 @@ local_tools = types.Tool(
         _glob_files_declaration,
         _grep_files_declaration,
         _fetch_url_declaration,
+        _git_status_declaration,
+        _git_diff_declaration,
+        _git_log_declaration,
+        _git_commit_declaration,
     ]
 )
 
 TOOL_DISPATCH = {
     "read_file": lambda args: read_file(**args),
     "write_file": lambda args: write_file(**args),
+    "edit_file": lambda args: edit_file(**args),
     "execute_bash": lambda args: execute_bash(**args),
     "execute_bash_background": lambda args: execute_bash_background(**args),
     "get_job_output": lambda args: get_job_output(**args),
@@ -705,6 +898,10 @@ TOOL_DISPATCH = {
     "glob_files": lambda args: glob_files(**args),
     "grep_files": lambda args: grep_files(**args),
     "fetch_url": lambda args: fetch_url(**args),
+    "git_status": lambda args: git_status(**args),
+    "git_diff": lambda args: git_diff(**args),
+    "git_log": lambda args: git_log(**args),
+    "git_commit": lambda args: git_commit(**args),
 }
 
 # ---------------------------------------------------------------------------
@@ -1108,7 +1305,11 @@ def run_agent(client: genai.Client, project_id: str, vagent_content: str) -> Non
                     break
 
                 # ── Tool execution turn ───────────────────────────────────
-                _SILENT_TOOLS = {"read_file", "list_directory", "glob_files", "grep_files", "get_job_output", "fetch_url"}
+                _SILENT_TOOLS = {
+                    "read_file", "list_directory", "glob_files", "grep_files",
+                    "get_job_output", "fetch_url",
+                    "git_status", "git_diff", "git_log",
+                }
                 function_response_parts: list[types.Part] = []
                 stuck = False
                 for fc in function_calls:
@@ -1117,14 +1318,21 @@ def run_agent(client: genai.Client, project_id: str, vagent_content: str) -> Non
 
                     if fn_name == "write_file":
                         fp_display = fn_args.get("filepath", "?")
+                        console.print(f"\n[bold white on dodger_blue1] ✎ WRITE [/bold white on dodger_blue1] [bold white] {fp_display} [/bold white]")
+                    elif fn_name == "edit_file":
+                        fp_display = fn_args.get("filepath", "?")
                         console.print(f"\n[bold white on dodger_blue1] ✎ EDIT [/bold white on dodger_blue1] [bold white] {fp_display} [/bold white]")
+                    elif fn_name == "git_commit":
+                        msg_display = fn_args.get("message", "?")
+                        console.print(f"\n[bold white on green4] ⎇ COMMIT [/bold white on green4] [bold white] {msg_display} [/bold white]")
                     elif fn_name == "execute_bash":
                         cmd_display = fn_args.get("command", "?")
                         console.print(f"\n[bold white on medium_purple1] ❯ RUN [/bold white on medium_purple1] [bold white] {cmd_display} [/bold white]")
                     elif fn_name == "execute_bash_background":
                         cmd_display = fn_args.get("command", "?")
                         console.print(f"\n[bold white on gray30] ❯ BG [/bold white on gray30] [bold white] {cmd_display} [/bold white]")
-                    elif fn_name in {"read_file", "glob_files", "grep_files", "get_job_output"}:
+                    elif fn_name in {"read_file", "glob_files", "grep_files", "get_job_output",
+                                     "git_status", "git_diff", "git_log", "fetch_url"}:
                         console.print(f"[gray50]• {fn_name}...[/gray50]", end="\r")
 
                     handler = TOOL_DISPATCH.get(fn_name)
@@ -1135,7 +1343,8 @@ def run_agent(client: genai.Client, project_id: str, vagent_content: str) -> Non
 
                     if result.startswith("ERROR:"):
                         error_counts[fn_name] = error_counts.get(fn_name, 0) + 1
-                        if fn_name in {"read_file", "glob_files", "grep_files", "get_job_output"}:
+                        if fn_name in {"read_file", "glob_files", "grep_files", "get_job_output",
+                                       "git_status", "git_diff", "git_log", "fetch_url"}:
                             console.print(" " * 40, end="\r")  # clear the running line
                         console.print(f"[dodger_blue1]•[/dodger_blue1] [dim white]{fn_name}[/dim white] [bright_red]✘[/bright_red]")
                         console.print(
