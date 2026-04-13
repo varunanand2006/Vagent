@@ -30,10 +30,26 @@ from rich.text import Text
 
 console = Console()
 DRY_RUN: bool = False
+PLAN_MODE: bool = False
 MODEL_NAME = "gemini-2.5-pro"
 LOCATION = "us-central1"
 TEMPERATURE = 0.3
 _SYSTEM_INSTRUCTION: str | None = None
+
+_PLAN_MODE_BLOCKED_TOOLS = {
+    "write_file", "edit_file", "execute_bash", "execute_bash_background",
+    "git_add", "git_commit",
+}
+_PLAN_MODE_ADDENDUM = """\
+
+## PLAN MODE ACTIVE
+You are currently in plan mode. Do NOT call any of these tools: \
+write_file, edit_file, execute_bash, execute_bash_background, git_add, git_commit.
+You MAY use read-only tools (read_file, glob_files, grep_files, list_directory, \
+git_status, git_diff, git_log, fetch_url) to explore the codebase.
+Instead of executing changes, describe exactly what you would do: which files you \
+would modify, what the diff would look like, and why. Be specific and actionable.
+"""
 
 
 _DEFAULT_SYSTEM_PROMPT = """\
@@ -1083,7 +1099,12 @@ def init_vertex() -> tuple[genai.Client, str, str]:
 
 def print_environment_header(vagent_content: str) -> None:
     tool_count = len(local_tools.function_declarations)
-    mode = "[bold yellow]DRY RUN[/bold yellow]" if DRY_RUN else "[bold dodger_blue1]Normal[/bold dodger_blue1]"
+    if DRY_RUN:
+        mode = "[bold yellow]DRY RUN[/bold yellow]"
+    elif PLAN_MODE:
+        mode = "[bold orange1]Plan[/bold orange1]"
+    else:
+        mode = "[bold dodger_blue1]Normal[/bold dodger_blue1]"
     vagent_status = "[bold dodger_blue1]Loaded[/bold dodger_blue1]" if vagent_content else "[gray50]None[/gray50]"
 
     grid = Table.grid(padding=(0, 2))
@@ -1106,6 +1127,7 @@ def print_help() -> None:
     cmd_table.add_row("[medium_purple1]/exit[/medium_purple1]", "Quit the agent")
     cmd_table.add_row("[medium_purple1]/clear[/medium_purple1]", "Wipe the conversation history")
     cmd_table.add_row("[medium_purple1]/compact[/medium_purple1]", "Summarise and compress history into a single context turn")
+    cmd_table.add_row("[medium_purple1]/plan[/medium_purple1]", "Toggle plan mode — model describes changes without executing them")
     cmd_table.add_row("[medium_purple1]/help[/medium_purple1]  or  [medium_purple1]?[/medium_purple1]", "Show this help")
 
     tools_table = Table(border_style="dim", show_header=True, header_style="bold")
@@ -1230,10 +1252,18 @@ def run_agent(client: genai.Client, project_id: str, vagent_content: str) -> Non
                         console.print("[bold red]History cleared.[/bold red]")
                 elif user_text == "/compact":
                     chat_history = compact_history(chat_history, client)
+                elif user_text == "/plan":
+                    global PLAN_MODE
+                    PLAN_MODE = not PLAN_MODE
+                    if PLAN_MODE:
+                        console.print("[bold orange1]Plan mode ON[/bold orange1] — model will describe changes without executing them.")
+                    else:
+                        console.print("[bold dodger_blue1]Plan mode OFF[/bold dodger_blue1] — normal execution resumed.")
                 else:
                     console.print(
                         f"[gray50]Unknown command: {user_text!r}. "
-                        "Available: [medium_purple1]/exit[/medium_purple1], [medium_purple1]/clear[/medium_purple1], [medium_purple1]/compact[/medium_purple1][/gray50]"
+                        "Available: [medium_purple1]/exit[/medium_purple1], [medium_purple1]/clear[/medium_purple1], "
+                        "[medium_purple1]/compact[/medium_purple1], [medium_purple1]/plan[/medium_purple1][/gray50]"
                     )
                 continue
 
@@ -1243,8 +1273,13 @@ def run_agent(client: genai.Client, project_id: str, vagent_content: str) -> Non
             turn_start = time.monotonic()
             error_counts: dict[str, int] = {}
             while True:
+                effective_system = (
+                    (_SYSTEM_INSTRUCTION or "") + _PLAN_MODE_ADDENDUM
+                    if PLAN_MODE
+                    else _SYSTEM_INSTRUCTION
+                )
                 config = types.GenerateContentConfig(
-                    system_instruction=_SYSTEM_INSTRUCTION,
+                    system_instruction=effective_system,
                     tools=[local_tools],
                     temperature=TEMPERATURE,
                 )
@@ -1375,6 +1410,11 @@ def run_agent(client: genai.Client, project_id: str, vagent_content: str) -> Non
                     handler = TOOL_DISPATCH.get(fn_name)
                     if handler is None:
                         result = f"ERROR: UnknownTool - No handler registered for '{fn_name}'."
+                    elif PLAN_MODE and fn_name in _PLAN_MODE_BLOCKED_TOOLS:
+                        result = (
+                            f"ERROR: PlanMode - '{fn_name}' is disabled in plan mode. "
+                            "Describe the change you would make instead of executing it."
+                        )
                     else:
                         result = handler(fn_args)
 

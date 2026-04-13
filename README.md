@@ -36,13 +36,27 @@ vagent --dry-run
 - **Local Tool Execution:** The agent can execute local tools on your machine, such as reading and writing files, executing shell commands, and listing directory contents. The available tools are:
     - `read_file`: Read the full text contents of a file on the local filesystem.
     - `write_file`: Write (overwrite) a file on the local filesystem with the given content.
+    - `edit_file`: Make a targeted edit to an existing file.
     - `execute_bash`: Execute a shell command on the local machine and return its stdout/stderr.
+    - `execute_bash_background`: Run a shell command in the background.
+    - `get_job_output`: Check the status and output of a background job.
     - `list_directory`: List the files and folders inside a directory on the local filesystem.
+    - `glob_files`: Find files matching a glob pattern.
+    - `grep_files`: Search file contents for lines matching a regex pattern.
+    - `fetch_url`: Fetch the content of a URL.
+- **Git Integration:** The agent can interact with git repositories:
+    - `git_status`: Show the working tree status.
+    - `git_diff`: Show unstaged changes.
+    - `git_log`: Show recent commit history.
+    - `git_add`: Stage files for the next commit.
+    - `git_commit`: Stage files and create a git commit.
 - **Confirmation Prompt:** For security, the agent will prompt for confirmation before executing potentially dangerous commands like `write_file` and `execute_bash`.
 - **Dry-Run Mode:** You can run the agent in dry-run mode to see what commands it would execute without actually making any changes to your system.
+- **Plan Mode:** You can run the agent in plan mode to have the model describe the changes it would make without executing them.
 - **History Compaction:** The agent can automatically compact the conversation history to stay within the model's token limit.
 - **Rich Display:** The agent uses the `rich` library to provide a rich and user-friendly command-line interface, including syntax highlighting for code blocks.
 - **Slash Commands:** The agent supports slash commands for performing common tasks, such as clearing the history, exiting the agent, and displaying help.
+- **.vagent File:** The agent can load project-specific context from a `.vagent` file in the current directory.
 
 ## Dependencies
 
@@ -60,4 +74,5 @@ The following slash commands are available:
 | `/exit`     | Quit the agent                             |
 | `/clear`    | Wipe the conversation history              |
 | `/compact`  | Summarise and compress history             |
+| `/plan`     | Toggle plan mode                           |
 | `/help` or `?` | Show this help                             |
