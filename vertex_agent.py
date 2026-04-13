@@ -1,5 +1,6 @@
 import argparse
 import difflib
+import html
 import os
 import re
 import subprocess
@@ -7,6 +8,8 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.request
+from html.parser import HTMLParser
 from pathlib import Path
 
 from google import genai
@@ -32,7 +35,6 @@ LOCATION = "us-central1"
 TEMPERATURE = 0.3
 _SYSTEM_INSTRUCTION: str | None = None
 
-_google_search_tool = types.Tool(google_search=types.GoogleSearch())
 
 _DEFAULT_SYSTEM_PROMPT = """\
 You are an expert software engineering assistant running as a local agentic REPL.
@@ -48,7 +50,7 @@ project's structure.
 Never reconstruct file contents from memory.
 - Prefer execute_bash_background for commands that may take more than a few seconds \
 (builds, installs, test suites). Poll with get_job_output until they finish.
-- Use google_search when you need current documentation, package versions, or \
+- Use fetch_url when you need current documentation, package versions, or \
 information beyond your training data.
 
 ## Behaviour
@@ -450,6 +452,59 @@ def grep_files(pattern: str, path: str = ".", glob: str = "**/*") -> str:
         return f"ERROR: {type(e).__name__} - {e}"
 
 
+class _TextExtractor(HTMLParser):
+    """Strip HTML tags and decode entities, keeping plain text."""
+    def __init__(self):
+        super().__init__()
+        self._parts: list[str] = []
+        self._skip = False
+
+    def handle_starttag(self, tag, attrs):
+        if tag in {"script", "style", "head"}:
+            self._skip = True
+
+    def handle_endtag(self, tag):
+        if tag in {"script", "style", "head"}:
+            self._skip = False
+        if tag in {"p", "br", "div", "li", "tr", "h1", "h2", "h3", "h4"}:
+            self._parts.append("\n")
+
+    def handle_data(self, data):
+        if not self._skip:
+            self._parts.append(data)
+
+    def get_text(self) -> str:
+        raw = "".join(self._parts)
+        # Collapse excessive whitespace while preserving paragraph breaks
+        raw = re.sub(r"\n{3,}", "\n\n", raw)
+        return raw.strip()
+
+
+def fetch_url(url: str) -> str:
+    MAX_CHARS = 12_000
+    try:
+        req = urllib.request.Request(
+            url,
+            headers={"User-Agent": "Mozilla/5.0 (compatible; vagent/1.0)"},
+        )
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            content_type = resp.headers.get("Content-Type", "")
+            raw = resp.read(MAX_CHARS * 4)  # read extra to allow for HTML overhead
+
+        text = raw.decode("utf-8", errors="replace")
+
+        if "text/html" in content_type:
+            parser = _TextExtractor()
+            parser.feed(html.unescape(text))
+            text = parser.get_text()
+
+        if len(text) > MAX_CHARS:
+            text = text[:MAX_CHARS] + f"\n\n... (truncated at {MAX_CHARS} chars)"
+        return text
+    except Exception as e:
+        return f"ERROR: {type(e).__name__} - {e}"
+
+
 # ---------------------------------------------------------------------------
 # Vertex AI Tool definitions
 # ---------------------------------------------------------------------------
@@ -560,6 +615,24 @@ _get_job_output_declaration = types.FunctionDeclaration(
     ),
 )
 
+_fetch_url_declaration = types.FunctionDeclaration(
+    name="fetch_url",
+    description=(
+        "Fetch the content of a URL and return it as plain text. "
+        "Use this to read documentation, browse search results, or retrieve any web page."
+    ),
+    parameters=types.Schema(
+        type=types.Type.OBJECT,
+        properties={
+            "url": types.Schema(
+                type=types.Type.STRING,
+                description="The fully-qualified URL to fetch (must start with http:// or https://).",
+            ),
+        },
+        required=["url"],
+    ),
+)
+
 _glob_files_declaration = types.FunctionDeclaration(
     name="glob_files",
     description=(
@@ -618,6 +691,7 @@ local_tools = types.Tool(
         _list_directory_declaration,
         _glob_files_declaration,
         _grep_files_declaration,
+        _fetch_url_declaration,
     ]
 )
 
@@ -630,6 +704,7 @@ TOOL_DISPATCH = {
     "list_directory": lambda args: list_directory(**args),
     "glob_files": lambda args: glob_files(**args),
     "grep_files": lambda args: grep_files(**args),
+    "fetch_url": lambda args: fetch_url(**args),
 }
 
 # ---------------------------------------------------------------------------
@@ -939,7 +1014,7 @@ def run_agent(client: genai.Client, project_id: str, vagent_content: str) -> Non
             while True:
                 config = types.GenerateContentConfig(
                     system_instruction=_SYSTEM_INSTRUCTION,
-                    tools=[local_tools, _google_search_tool],
+                    tools=[local_tools],
                     temperature=TEMPERATURE,
                 )
                 status = console.status(
@@ -1033,7 +1108,7 @@ def run_agent(client: genai.Client, project_id: str, vagent_content: str) -> Non
                     break
 
                 # ── Tool execution turn ───────────────────────────────────
-                _SILENT_TOOLS = {"read_file", "list_directory", "glob_files", "grep_files", "get_job_output"}
+                _SILENT_TOOLS = {"read_file", "list_directory", "glob_files", "grep_files", "get_job_output", "fetch_url"}
                 function_response_parts: list[types.Part] = []
                 stuck = False
                 for fc in function_calls:
