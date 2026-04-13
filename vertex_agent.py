@@ -33,6 +33,32 @@ _SYSTEM_INSTRUCTION: str | None = None
 
 _google_search_tool = types.Tool(google_search=types.GoogleSearch())
 
+_DEFAULT_SYSTEM_PROMPT = """\
+You are an expert software engineering assistant running as a local agentic REPL.
+You have access to tools that can read and write files, execute shell commands, \
+search file contents, and browse the web. Use them proactively to complete tasks \
+accurately rather than guessing.
+
+## Tool usage guidelines
+- Always call glob_files or list_directory to orient yourself before assuming a \
+project's structure.
+- Always call grep_files to locate relevant code before reading entire files.
+- Always call read_file before write_file on any file that already exists. \
+Never reconstruct file contents from memory.
+- Prefer execute_bash_background for commands that may take more than a few seconds \
+(builds, installs, test suites). Poll with get_job_output until they finish.
+- Use google_search when you need current documentation, package versions, or \
+information beyond your training data.
+
+## Behaviour
+- Make the smallest correct change. Do not refactor or reformat code outside the \
+scope of the request.
+- When a task requires multiple steps, state your plan briefly before executing it.
+- If something is unclear, ask a single focused question rather than proceeding \
+on assumptions.
+- Never delete or overwrite files without explicit instruction to do so.
+"""
+
 # Tracks files read in the current session to enforce read-before-write.
 _read_files: set[str] = set()
 
@@ -723,14 +749,18 @@ def init_vertex() -> tuple[genai.Client, str, str]:
             "or: set GOOGLE_CLOUD_PROJECT=YOUR_PROJECT"
         )
 
-    # Load project-specific context from .vagent in the current directory.
+    # Start with the default system prompt, then append any .vagent project context.
+    _SYSTEM_INSTRUCTION = _DEFAULT_SYSTEM_PROMPT
     vagent_content = ""
     vagent_path = Path(".vagent")
     if vagent_path.exists():
         try:
             vagent_content = vagent_path.read_text(encoding="utf-8").strip()
             if vagent_content:
-                _SYSTEM_INSTRUCTION = f"Project Specific Context:\n{vagent_content}"
+                _SYSTEM_INSTRUCTION = (
+                    f"{_DEFAULT_SYSTEM_PROMPT}\n\n"
+                    f"## Project-specific context\n{vagent_content}"
+                )
         except Exception as e:
             console.print(f"[dim yellow]Warning: could not read .vagent: {e}[/dim yellow]")
 
