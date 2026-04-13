@@ -4,6 +4,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -29,6 +30,13 @@ MODEL_NAME = "gemini-2.5-pro"
 LOCATION = "us-central1"
 _SYSTEM_INSTRUCTION: str | None = None
 
+# Tracks files read in the current session to enforce read-before-write.
+_read_files: set[str] = set()
+
+# Background job registry: job_id -> {process, command, start_time, paths, file handles}
+_background_jobs: dict[str, dict] = {}
+_job_counter: int = 0
+
 
 def _confirm_execution(prompt: str) -> bool:
     response = console.input(f"{prompt} — Allow execution? [bold dodger_blue1]\\[y/n][/bold dodger_blue1]: ").strip().lower()
@@ -38,7 +46,9 @@ def _confirm_execution(prompt: str) -> bool:
 def read_file(filepath: str) -> str:
     try:
         with open(filepath, "r", encoding="utf-8") as f:
-            return f.read()
+            content = f.read()
+        _read_files.add(str(Path(filepath).resolve()))
+        return content
     except Exception as e:
         return f"ERROR: {type(e).__name__} - {e}"
 
@@ -163,6 +173,11 @@ def write_file(filepath: str, content: str) -> str:
     is_new_file = not fp.exists()
     old_content = ""
     if not is_new_file:
+        if str(fp.resolve()) not in _read_files:
+            return (
+                f"ERROR: ReadRequired - '{filepath}' already exists but has not been read "
+                "in this session. Call read_file first so you have the current contents."
+            )
         try:
             old_content = fp.read_text(encoding="utf-8")
         except Exception:
@@ -266,6 +281,95 @@ def execute_bash(command: str) -> str:
         return "ERROR: TimeoutExpired - Command timed out after 60 seconds."
     except Exception as e:
         return f"ERROR: {type(e).__name__} - {e}"
+
+
+def execute_bash_background(command: str) -> str:
+    global _job_counter
+    if DRY_RUN:
+        console.print(f"[dim][DRY RUN] Would have started background job: {command!r}[/dim]")
+        return "Success"
+    if not _confirm_execution(f"[bold #ffffd7]execute_bash_background({command!r})[/bold #ffffd7]"):
+        return "Execution blocked by user."
+
+    _job_counter += 1
+    job_id = str(_job_counter)
+    stdout_path = os.path.join(tempfile.gettempdir(), f"vagent_job_{job_id}.out")
+    stderr_path = os.path.join(tempfile.gettempdir(), f"vagent_job_{job_id}.err")
+
+    try:
+        stdout_f = open(stdout_path, "w", encoding="utf-8")
+        stderr_f = open(stderr_path, "w", encoding="utf-8")
+        process = subprocess.Popen(
+            command,
+            shell=True,
+            stdout=stdout_f,
+            stderr=stderr_f,
+            text=True,
+        )
+        _background_jobs[job_id] = {
+            "process": process,
+            "command": command,
+            "start_time": time.monotonic(),
+            "stdout_path": stdout_path,
+            "stderr_path": stderr_path,
+            "stdout_f": stdout_f,
+            "stderr_f": stderr_f,
+        }
+        return f"Job {job_id} started (PID {process.pid}). Use get_job_output('{job_id}') to check status."
+    except Exception as e:
+        try:
+            stdout_f.close()
+            stderr_f.close()
+        except Exception:
+            pass
+        return f"ERROR: {type(e).__name__} - {e}"
+
+
+def get_job_output(job_id: str) -> str:
+    job = _background_jobs.get(job_id)
+    if job is None:
+        available = list(_background_jobs.keys())
+        return f"ERROR: No job with ID '{job_id}'. Active jobs: {available or 'none'}"
+
+    process = job["process"]
+    returncode = process.poll()
+    elapsed = time.monotonic() - job["start_time"]
+
+    if returncode is not None:
+        try:
+            job["stdout_f"].close()
+            job["stderr_f"].close()
+        except Exception:
+            pass
+
+    try:
+        stdout = Path(job["stdout_path"]).read_text(encoding="utf-8", errors="ignore")
+    except Exception:
+        stdout = "(could not read stdout)"
+    try:
+        stderr = Path(job["stderr_path"]).read_text(encoding="utf-8", errors="ignore")
+    except Exception:
+        stderr = ""
+
+    if returncode is None:
+        status = f"RUNNING ({elapsed:.1f}s elapsed)"
+    else:
+        status = f"DONE (exit code {returncode}, {elapsed:.1f}s)"
+        try:
+            os.unlink(job["stdout_path"])
+            os.unlink(job["stderr_path"])
+        except Exception:
+            pass
+        del _background_jobs[job_id]
+
+    lines = [f"Job {job_id}: {job['command']!r}", f"Status: {status}"]
+    if stdout.strip():
+        lines.append(f"STDOUT:\n{stdout.rstrip()}")
+    if stderr.strip():
+        lines.append(f"STDERR:\n{stderr.rstrip()}")
+    if not stdout.strip() and not stderr.strip():
+        lines.append("(no output yet)")
+    return "\n".join(lines)
 
 
 def glob_files(pattern: str, path: str = ".") -> str:
@@ -389,6 +493,43 @@ _execute_bash_declaration = types.FunctionDeclaration(
     ),
 )
 
+_execute_bash_background_declaration = types.FunctionDeclaration(
+    name="execute_bash_background",
+    description=(
+        "Start a shell command in the background without blocking. Returns a job ID immediately. "
+        "Use get_job_output to check status and retrieve output. "
+        "The user will be prompted to confirm before the command runs."
+    ),
+    parameters=types.Schema(
+        type=types.Type.OBJECT,
+        properties={
+            "command": types.Schema(
+                type=types.Type.STRING,
+                description="The shell command to run in the background.",
+            ),
+        },
+        required=["command"],
+    ),
+)
+
+_get_job_output_declaration = types.FunctionDeclaration(
+    name="get_job_output",
+    description=(
+        "Check the status and output of a background job started with execute_bash_background. "
+        "Returns status (RUNNING or DONE), stdout, and stderr."
+    ),
+    parameters=types.Schema(
+        type=types.Type.OBJECT,
+        properties={
+            "job_id": types.Schema(
+                type=types.Type.STRING,
+                description="The job ID returned by execute_bash_background.",
+            ),
+        },
+        required=["job_id"],
+    ),
+)
+
 _glob_files_declaration = types.FunctionDeclaration(
     name="glob_files",
     description=(
@@ -442,6 +583,8 @@ local_tools = types.Tool(
         _read_file_declaration,
         _write_file_declaration,
         _execute_bash_declaration,
+        _execute_bash_background_declaration,
+        _get_job_output_declaration,
         _list_directory_declaration,
         _glob_files_declaration,
         _grep_files_declaration,
@@ -452,6 +595,8 @@ TOOL_DISPATCH = {
     "read_file": lambda args: read_file(**args),
     "write_file": lambda args: write_file(**args),
     "execute_bash": lambda args: execute_bash(**args),
+    "execute_bash_background": lambda args: execute_bash_background(**args),
+    "get_job_output": lambda args: get_job_output(**args),
     "list_directory": lambda args: list_directory(**args),
     "glob_files": lambda args: glob_files(**args),
     "grep_files": lambda args: grep_files(**args),
@@ -688,6 +833,7 @@ def run_agent(client: genai.Client, project_id: str, vagent_content: str) -> Non
                         console.print("[dim]History is already empty.[/dim]")
                     else:
                         chat_history.clear()
+                        _read_files.clear()
                         console.print("[bold red]History cleared.[/bold red]")
                 elif user_text == "/compact":
                     chat_history = compact_history(chat_history, client)
@@ -776,7 +922,7 @@ def run_agent(client: genai.Client, project_id: str, vagent_content: str) -> Non
                     break
 
                 # ── Tool execution turn ───────────────────────────────────
-                _SILENT_TOOLS = {"read_file", "list_directory", "glob_files", "grep_files"}
+                _SILENT_TOOLS = {"read_file", "list_directory", "glob_files", "grep_files", "get_job_output"}
                 function_response_parts: list[types.Part] = []
                 stuck = False
                 for fc in function_calls:
@@ -789,7 +935,10 @@ def run_agent(client: genai.Client, project_id: str, vagent_content: str) -> Non
                     elif fn_name == "execute_bash":
                         cmd_display = fn_args.get("command", "?")
                         console.print(f"\n[bold white on medium_purple1] ❯ RUN [/bold white on medium_purple1] [bold white] {cmd_display} [/bold white]")
-                    elif fn_name in {"read_file", "glob_files", "grep_files"}:
+                    elif fn_name == "execute_bash_background":
+                        cmd_display = fn_args.get("command", "?")
+                        console.print(f"\n[bold white on gray30] ❯ BG [/bold white on gray30] [bold white] {cmd_display} [/bold white]")
+                    elif fn_name in {"read_file", "glob_files", "grep_files", "get_job_output"}:
                         console.print(f"[gray50]• {fn_name}...[/gray50]", end="\r")
 
                     handler = TOOL_DISPATCH.get(fn_name)
@@ -800,7 +949,7 @@ def run_agent(client: genai.Client, project_id: str, vagent_content: str) -> Non
 
                     if result.startswith("ERROR:"):
                         error_counts[fn_name] = error_counts.get(fn_name, 0) + 1
-                        if fn_name in {"read_file", "glob_files", "grep_files"}:
+                        if fn_name in {"read_file", "glob_files", "grep_files", "get_job_output"}:
                             console.print(" " * 40, end="\r")  # clear the running line
                         console.print(f"[dodger_blue1]•[/dodger_blue1] [dim white]{fn_name}[/dim white] [bright_red]✘[/bright_red]")
                         console.print(
