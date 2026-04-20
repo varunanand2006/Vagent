@@ -33,14 +33,15 @@ vagent --dry-run
 
 ## Features
 
+- **Multimodal Vision Support:** Drag and drop images (PNG, JPG, WEBP, HEIC) right into the terminal. The agent will read the pixels and write code based on UI mockups or screenshots of bugs!
+- **Native Google Search Grounding:** The agent can autonomously query Google Search in real-time to find up-to-date documentation, read StackOverflow, and provide clickable citations.
+- **Sub-Agent Workflows:** Use `delegate_task` to spawn parallel Gemini instances with fresh context windows to complete massive, multi-step refactors without losing track of the main conversation.
 - **Local Tool Execution:** The agent can execute local tools on your machine, such as reading and writing files, executing shell commands, and listing directory contents.
+- **Long-term Memory:** The agent learns your project rules over time, saving them to a `.vagent` file so it remembers how to run your tests across sessions.
 - **Confirmation Prompt:** For security, the agent will prompt for confirmation before executing potentially dangerous commands like `write_file` and `execute_bash`.
 - **Dry-Run Mode:** You can run the agent in dry-run mode to see what commands it would execute without actually making any changes to your system.
 - **Plan Mode:** You can run the agent in plan mode to have the model describe the changes it would make without executing them.
 - **History Compaction:** The agent can automatically compact the conversation history to stay within the model's token limit.
-- **Rich Display:** The agent uses the `rich` library to provide a rich and user-friendly command-line interface, including syntax highlighting for code blocks.
-- **Slash Commands:** The agent supports slash commands for performing common tasks, such as clearing the history, exiting the agent, and displaying help.
-- **.vagent File:** The agent can load project-specific context from a `.vagent` file in the current directory.
 
 ## Dependencies
 
@@ -53,12 +54,22 @@ vagent --dry-run
 
 The agent has access to the following local tools:
 
-| Tool             | Description                                                                                                   |
-| ---------------- | ------------------------------------------------------------------------------------------------------------- |
-| `read_file`      | Read the full text contents of a file on the local filesystem.                                                |
-| `write_file`     | Write (overwrite) a file on the local filesystem with the given content.                                      |
-| `execute_bash`   | Execute a shell command on the local machine and return its stdout/stderr.                                    |
-| `list_directory` | List the files and folders inside a directory on the local filesystem.                                        |
+| Tool                      | Description                                                                                                                               |
+| ------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| `read_file`               | Read the full text contents of a file on the local filesystem.                                                                            |
+| `write_file`              | Write (overwrite) a file on the local filesystem with the given content. (Prompts for confirmation)                                       |
+| `edit_file`               | Surgically edit an existing file by replacing an exact string with new text. Token-efficient and safe. (Prompts for confirmation)         |
+| `execute_bash`            | Execute a shell command on the local machine and return its stdout/stderr. (Prompts for confirmation)                                     |
+| `execute_bash_background` | Start a long-running background job without blocking (e.g., servers, test watchers).                                                      |
+| `get_job_output`          | Check the status, stdout, and stderr of a background job.                                                                                 |
+| `ask_user`                | Pause the autonomous loop to ask the user a specific question, waiting for their response before continuing.                              |
+| `save_memory`             | Remember a fact or project rule permanently across sessions by saving it to `.vagent`.                                                    |
+| `delegate_task`           | Spawn a secondary Gemini subagent to autonomously complete a multi-step task in parallel, returning a summary.                            |
+| `list_directory`          | List the files and folders inside a directory on the local filesystem.                                                                    |
+| `glob_files`              | Find files across the project matching a glob pattern (e.g. `**/*.py`).                                                                   |
+| `grep_files`              | Regex search across file contents in the project to find specific code or variables.                                                      |
+| `fetch_url`               | Fetch plain text content from a URL (useful for reading docs).                                                                            |
+| `git_*`                   | Suite of Git tools (`git_status`, `git_diff`, `git_log`, `git_add`, `git_commit`) to autonomously track and commit changes.               |
 
 ## Slash Commands
 

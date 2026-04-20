@@ -15,7 +15,7 @@ dependencies = [
 ]
 
 [project.scripts]
-vagent = "vertex_agent:main"
+vagent = "vagent.cli:main"
 
-[tool.setuptools]
-py-modules = ["vertex_agent"]
+[tool.setuptools.packages.find]
+where = ["src"]
